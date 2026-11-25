@@ -17,12 +17,8 @@ use std::num::NonZeroI8;
 use t22::{accounts, instruction, ID};
 use t22new::{
     extension::{
-        confidential_transfer::{instruction as ct_ix, ConfidentialTransferAccount},
-        confidential_transfer_fee::{instruction::{disable_harvest_to_mint, enable_harvest_to_mint},ConfidentialTransferFeeAmount, ConfidentialTransferFeeConfig},
-        BaseStateWithExtensions, ExtensionType, StateWithExtensions,
-    },
-    instruction::{initialize_account3, mint_to},
-    state::{Account as TokenAccountState, Mint as MintState}
+        BaseStateWithExtensions, ExtensionType, StateWithExtensions, confidential_transfer::{ConfidentialTransferAccount, instruction as ct_ix}, confidential_transfer_fee::{ConfidentialTransferFeeAmount, ConfidentialTransferFeeConfig, instruction::{disable_harvest_to_mint, enable_harvest_to_mint}},
+    }, instruction::{initialize_account3, mint_to, thaw_account}, state::{Account as TokenAccountState, AccountState, Mint as MintState}
 };
 use zk::{
     encryption::{
@@ -216,6 +212,167 @@ fn create_and_configure(
         aes,
     }
 }
+
+
+
+/// Create, thaw, configure, and manually approve a confidential account
+/// through the Anchor program.
+fn create_and_configure_anchor(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    mint: &Pubkey,
+    owner: &Keypair,
+) -> Holder {
+    let ta = Keypair::new();
+
+    // The regulated mint has TransferFeeConfig and ConfidentialTransferMint.
+    let space = ExtensionType::try_calculate_account_len::<TokenAccountState>(&[
+        ExtensionType::TransferFeeAmount,
+        ExtensionType::ConfidentialTransferAccount,
+    ])
+    .unwrap();
+
+    let lamports = svm.minimum_balance_for_rent_exemption(space);
+
+    // Create and initialize the Token-2022 account.
+    send(
+        svm,
+        payer,
+        &[
+            solana_system_interface::instruction::create_account(
+                &payer.pubkey(),
+                &ta.pubkey(),
+                lamports,
+                space as u64,
+                &TOKEN_2022_PROGRAM_ID,
+            ),
+            initialize_account3(
+                &TOKEN_2022_PROGRAM_ID,
+                &ta.pubkey(),
+                mint,
+                &owner.pubkey(),
+            )
+            .unwrap(),
+        ],
+        &[&ta],
+    );
+
+    // Thaw automatically only if the mint defaulted this account to Frozen.
+    let account_data = svm.get_account(&ta.pubkey()).unwrap().data;
+    let state = StateWithExtensions::<TokenAccountState>::unpack(&account_data).unwrap();
+    if state.base.state == AccountState::Frozen {
+        send(
+            svm,
+            payer,
+            &[
+                thaw_account(
+                    &TOKEN_2022_PROGRAM_ID,
+                    &ta.pubkey(),
+                    mint,
+                    &payer.pubkey(),
+                    &[],
+                )
+                .unwrap(),
+            ],
+            &[],
+        );
+    }
+
+    let (elgamal, aes) = derive_confidential_keys(owner, b"").unwrap();
+
+    // Generate and verify the public-key validity proof.
+    let proof = build_pubkey_validity_proof_data(&elgamal).unwrap();
+
+    let proof_context = stage_proof(
+        svm,
+        payer,
+        ProofInstruction::VerifyPubkeyValidity,
+        &proof,
+    );
+
+    // Configure through the Anchor handler.
+    let configure_ix = Instruction {
+        program_id: ID,
+        accounts: accounts::ConfigureConfidentialAccount {
+            token_account: ta.pubkey(),
+            mint: *mint,
+            pubkey_validity_context: proof_context,
+            owner: owner.pubkey(),
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+        data: instruction::ConfigureConfidentialAccount {
+            zero_balance: aes.encrypt(0).to_bytes(),
+            max_pending_credit_counter: 65_536,
+        }
+        .data(),
+    };
+
+    send(svm, payer, &[configure_ix], &[owner]);
+
+    close_contexts(svm, payer, &[proof_context]);
+
+    // The regulated mint has auto_approve_new_accounts = false.
+    // The issuer must explicitly approve the configured account.
+    let approve_ix = Instruction {
+        program_id: ID,
+        accounts: accounts::ApproveConfidentialAccount {
+            token_account: ta.pubkey(),
+            mint: *mint,
+            issuer: payer.pubkey(),
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+        data: instruction::ApproveConfidentialAccount {}.data(),
+    };
+
+    send(svm, payer, &[approve_ix], &[]);
+
+    let ct = read_ct(svm, &ta.pubkey());
+    assert!(bool::from(ct.approved));
+
+    Holder {
+        account: ta.pubkey(),
+        elgamal,
+        aes,
+    }
+}
+
+/// Apply pending balance through the Anchor program.
+fn apply_pending_anchor(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    holder: &Holder,
+    owner: &Keypair,
+) {
+    let ct = read_ct(svm, &holder.account);
+
+    let counter: u64 = ct.pending_balance_credit_counter.into();
+
+    let new_available =
+        available_balance(&ct, &holder.elgamal)
+        + pending_balance(&ct, &holder.elgamal);
+
+    let encrypted_balance = holder.aes.encrypt(new_available).to_bytes();
+
+    let ix = Instruction {
+        program_id: ID,
+        accounts: accounts::ApplyConfidentialPendingBalance {
+            token_account: holder.account,
+            owner: owner.pubkey(),
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+        data: instruction::ApplyConfidentialPendingBalance {
+            expected_credit_counter: counter,
+            new_balance: encrypted_balance,
+        }
+        .data(),
+    };
+
+    send(svm, payer, &[ix], &[owner]);
+}
+
 
 /// Read the confidential extension off a token account.
 fn read_ct(svm: &LiteSVM, account: &Pubkey) -> ConfidentialTransferAccount {
@@ -574,6 +731,417 @@ fn full_confidential_lifecycle() {
     );
     println!(
         "bob confidential available = {}",
+        transfer_amount - withdraw_amount
+    );
+}
+
+
+#[test]
+fn full_confidential_lifecycle_2() {
+    let (mut svm, payer) = setup();
+
+    let mint = Keypair::new();
+
+    // ---------------------------------------------------------
+    // 1. Create the regulated confidential mint.
+    // ---------------------------------------------------------
+
+    send(
+        &mut svm,
+        &payer,
+        &[Instruction {
+            program_id: ID,
+            accounts: accounts::CreateConfidentialMint {
+                payer: payer.pubkey(),
+                mint: mint.pubkey(),
+                token_program: TOKEN_2022_PROGRAM_ID,
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+            data: instruction::CreateConfidentialMint {
+                decimals: DECIMALS,
+                auto_approve_new_accounts: true,
+                //basis_points: FEE_BASIS_POINTS,
+                //maximum_fee: MAXIMUM_FEE,
+            }
+            .data(),
+        }],
+        &[&mint],
+    );
+
+    let mint_account = svm.get_account(&mint.pubkey()).unwrap();
+    let mint_state =
+        StateWithExtensions::<MintState>::unpack(&mint_account.data).unwrap();
+
+    let extensions = mint_state.get_extension_types().unwrap();
+
+    // assert!(extensions.contains(&ExtensionType::TransferFeeConfig));
+    // assert!(extensions.contains(&ExtensionType::MetadataPointer));
+    // assert!(extensions.contains(&ExtensionType::DefaultAccountState));
+    // assert!(extensions.contains(&ExtensionType::MintCloseAuthority));
+    // assert!(extensions.contains(&ExtensionType::PermanentDelegate));
+    assert!(extensions.contains(&ExtensionType::ConfidentialTransferMint));
+    assert_eq!(extensions.len(), 1,"This test creates a basic confidential mint");
+
+    // ---------------------------------------------------------
+    // 2. Create, configure, and manually approve Alice and Bob.
+    // ---------------------------------------------------------
+
+    let alice_owner = Keypair::new();
+    let bob_owner = Keypair::new();
+
+    svm.airdrop(&alice_owner.pubkey(), 10_000_000_000).unwrap();
+    svm.airdrop(&bob_owner.pubkey(), 10_000_000_000).unwrap();
+
+    let alice = create_and_configure_anchor(
+        &mut svm,
+        &payer,
+        &mint.pubkey(),
+        &alice_owner,
+    );
+
+    let bob = create_and_configure_anchor(
+        &mut svm,
+        &payer,
+        &mint.pubkey(),
+        &bob_owner,
+    );
+
+    assert!(bool::from(read_ct(&svm, &alice.account).approved));
+    assert!(bool::from(read_ct(&svm, &bob.account).approved));
+
+    // ---------------------------------------------------------
+    // 3. Mint public tokens to Alice.
+    // ---------------------------------------------------------
+
+    send(
+        &mut svm,
+        &payer,
+        &[
+            mint_to(
+                &TOKEN_2022_PROGRAM_ID,
+                &mint.pubkey(),
+                &alice.account,
+                &payer.pubkey(),
+                &[],
+                10_000,
+            )
+            .unwrap(),
+        ],
+        &[],
+    );
+
+    // ---------------------------------------------------------
+    // 4. Deposit through the Anchor handler.
+    // ---------------------------------------------------------
+
+    let deposit_ix = Instruction {
+        program_id: ID,
+        accounts: accounts::DepositConfidentialTokens {
+            token_account: alice.account,
+            mint: mint.pubkey(),
+            owner: alice_owner.pubkey(),
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+        data: instruction::DepositConfidentialTokens {
+            amount: 10_000,
+            decimals: DECIMALS,
+        }
+        .data(),
+    };
+
+    send(
+        &mut svm,
+        &payer,
+        &[deposit_ix],
+        &[&alice_owner],
+    );
+
+    let alice_ct = read_ct(&svm, &alice.account);
+
+    assert_eq!(
+        pending_balance(&alice_ct, &alice.elgamal),
+        10_000
+    );
+
+    assert_eq!(
+        available_balance(&alice_ct, &alice.elgamal),
+        0
+    );
+
+    // ---------------------------------------------------------
+    // 5. Apply Alice's pending balance through Anchor.
+    // ---------------------------------------------------------
+
+    apply_pending_anchor(
+        &mut svm,
+        &payer,
+        &alice,
+        &alice_owner,
+    );
+
+    let alice_ct = read_ct(&svm, &alice.account);
+
+    let alice_available =
+        available_balance(&alice_ct, &alice.elgamal);
+
+    assert_eq!(alice_available, 10_000);
+
+    // ---------------------------------------------------------
+    // 6. Generate confidential transfer proofs.
+    // ---------------------------------------------------------
+
+    let transfer_amount = 2_500u64;
+
+    let alice_ct = read_ct(&svm, &alice.account);
+
+    let current_available: ElGamalCiphertext =
+        alice_ct.available_balance.try_into().unwrap();
+
+    let current_decryptable: AeCiphertext =
+        alice_ct.decryptable_available_balance.try_into().unwrap();
+
+    let bob_ct = read_ct(&svm, &bob.account);
+
+    let bob_pubkey: ElGamalPubkey =
+        bob_ct.elgamal_pubkey.try_into().unwrap();
+
+    let proofs = transfer_split_proof_data(
+        &current_available,
+        &current_decryptable,
+        transfer_amount,
+        &alice.elgamal,
+        &alice.aes,
+        &bob_pubkey,
+        None,
+    )
+    .unwrap();
+
+    let eq_ctx = stage_proof(
+        &mut svm,
+        &payer,
+        ProofInstruction::VerifyCiphertextCommitmentEquality,
+        &proofs.equality_proof_data,
+    );
+
+    let val_ctx = stage_proof(
+        &mut svm,
+        &payer,
+        ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity,
+        &proofs
+            .ciphertext_validity_proof_data_with_ciphertext
+            .proof_data,
+    );
+
+    let range_ctx = stage_proof(
+        &mut svm,
+        &payer,
+        ProofInstruction::VerifyBatchedRangeProofU128,
+        &proofs.range_proof_data,
+    );
+
+    let new_alice_decryptable =
+        alice.aes.encrypt(alice_available - transfer_amount).to_bytes();
+
+    let ciphertext_lo: [u8; 64] = bytemuck::bytes_of(
+        &proofs
+            .ciphertext_validity_proof_data_with_ciphertext
+            .ciphertext_lo,
+    )
+    .try_into()
+    .unwrap();
+
+    let ciphertext_hi: [u8; 64] = bytemuck::bytes_of(
+        &proofs
+            .ciphertext_validity_proof_data_with_ciphertext
+            .ciphertext_hi,
+    )
+    .try_into()
+    .unwrap();
+
+    // ---------------------------------------------------------
+    // 7. Execute confidential transfer through Anchor.
+    // ---------------------------------------------------------
+
+    let transfer_ix = Instruction {
+        program_id: ID,
+        accounts: accounts::TransferConfidentialTokens {
+            source: alice.account,
+            mint: mint.pubkey(),
+            destination: bob.account,
+            equality_proof_context: eq_ctx,
+            ciphertext_validity_context: val_ctx,
+            range_proof_context: range_ctx,
+            owner: alice_owner.pubkey(),
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+        data: instruction::TransferConfidentialTokens {
+            new_source_decryptable_balance: new_alice_decryptable,
+            transfer_amount_auditor_ciphertext_lo: ciphertext_lo,
+            transfer_amount_auditor_ciphertext_hi: ciphertext_hi,
+        }
+        .data(),
+    };
+
+    send(
+        &mut svm,
+        &payer,
+        &[transfer_ix],
+        &[&alice_owner],
+    );
+
+    close_contexts(
+        &mut svm,
+        &payer,
+        &[eq_ctx, val_ctx, range_ctx],
+    );
+
+    // Alice must have been debited.
+    let alice_after = read_ct(&svm, &alice.account);
+
+    assert_eq!(
+        available_balance(&alice_after, &alice.elgamal),
+        alice_available - transfer_amount
+    );
+
+    // Bob receives the transfer as pending, not available.
+    let bob_after = read_ct(&svm, &bob.account);
+
+    assert_eq!(
+        pending_balance(&bob_after, &bob.elgamal),
+        transfer_amount
+    );
+
+    assert_eq!(
+        available_balance(&bob_after, &bob.elgamal),
+        0
+    );
+
+    // ---------------------------------------------------------
+    // 8. Bob applies his pending balance through Anchor.
+    // ---------------------------------------------------------
+
+    apply_pending_anchor(
+        &mut svm,
+        &payer,
+        &bob,
+        &bob_owner,
+    );
+
+    let bob_ct = read_ct(&svm, &bob.account);
+
+    let bob_available =
+        available_balance(&bob_ct, &bob.elgamal);
+
+    assert_eq!(bob_available, transfer_amount);
+
+    // ---------------------------------------------------------
+    // 9. Generate fresh withdrawal proofs AFTER applying pending.
+    // ---------------------------------------------------------
+
+    let withdraw_amount = 1_000u64;
+
+    // Read the latest post-apply state.
+    let bob_ct = read_ct(&svm, &bob.account);
+
+    let bob_current: ElGamalCiphertext =
+        bob_ct.available_balance.try_into().unwrap();
+
+    let bob_available =
+        available_balance(&bob_ct, &bob.elgamal);
+
+    let withdraw_proofs = withdraw_proof_data(
+        &bob_current,
+        bob_available,
+        withdraw_amount,
+        &bob.elgamal,
+    )
+    .unwrap();
+
+    let withdraw_eq_ctx = stage_proof(
+        &mut svm,
+        &payer,
+        ProofInstruction::VerifyCiphertextCommitmentEquality,
+        &withdraw_proofs.equality_proof_data,
+    );
+
+    let withdraw_range_ctx = stage_proof(
+        &mut svm,
+        &payer,
+        ProofInstruction::VerifyBatchedRangeProofU64,
+        &withdraw_proofs.range_proof_data,
+    );
+
+    let new_bob_decryptable =
+        bob.aes.encrypt(bob_available - withdraw_amount).to_bytes();
+
+    // ---------------------------------------------------------
+    // 10. Withdraw through the Anchor handler.
+    // ---------------------------------------------------------
+
+    let withdraw_ix = Instruction {
+        program_id: ID,
+        accounts: accounts::WithdrawConfidentialTokens {
+            token_account: bob.account,
+            mint: mint.pubkey(),
+            equality_proof_context: withdraw_eq_ctx,
+            range_proof_context: withdraw_range_ctx,
+            owner: bob_owner.pubkey(),
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+        data: instruction::WithdrawConfidentialTokens {
+            amount: withdraw_amount,
+            decimals: DECIMALS,
+            new_decryptable_available_balance: new_bob_decryptable,
+        }
+        .data(),
+    };
+
+    send(
+        &mut svm,
+        &payer,
+        &[withdraw_ix],
+        &[&bob_owner],
+    );
+
+    close_contexts(
+        &mut svm,
+        &payer,
+        &[withdraw_eq_ctx, withdraw_range_ctx],
+    );
+
+    // ---------------------------------------------------------
+    // 11. Verify final public and confidential balances.
+    // ---------------------------------------------------------
+
+    let bob_account = svm.get_account(&bob.account).unwrap();
+
+    let bob_state =
+        StateWithExtensions::<TokenAccountState>::unpack(&bob_account.data)
+            .unwrap();
+
+    assert_eq!(bob_state.base.amount, withdraw_amount);
+
+    let bob_ct = read_ct(&svm, &bob.account);
+
+    assert_eq!(
+        available_balance(&bob_ct, &bob.elgamal),
+        transfer_amount - withdraw_amount
+    );
+
+    assert_eq!(
+        pending_balance(&bob_ct, &bob.elgamal),
+        0
+    );
+
+    println!("Anchor confidential lifecycle passed.");
+    println!("Alice confidential balance: {}", alice_available - transfer_amount);
+    println!("Bob public balance: {}", withdraw_amount);
+    println!(
+        "Bob confidential balance: {}",
         transfer_amount - withdraw_amount
     );
 }

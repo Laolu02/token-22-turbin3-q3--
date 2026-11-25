@@ -7,12 +7,14 @@ use anchor_lang::{
 use anchor_spl::token_interface::spl_token_2022::{
     extension::{
         default_account_state::instruction::initialize_default_account_state,
+        transfer_hook::instruction::initialize as initialize_transfer_hook,
         mint_close_authority::MintCloseAuthority, transfer_fee::TransferFeeConfig,
         BaseStateWithExtensions, ExtensionType, StateWithExtensions,
     },
     instruction::initialize_mint2,
     state::{AccountState, Mint as MintState},
 };
+
 use litesvm::LiteSVM;
 use solana_account::Account;
 use solana_keypair::Keypair;
@@ -267,16 +269,15 @@ fn validation_accepts_a_mint_whose_extensions_are_allowlisted() {
 fn validation_rejects_a_mint_carrying_an_unlisted_extension() {
     let (mut svm, payer) = setup();
     let mint = Keypair::new();
- 
-    // Built with the raw Token-2022 instructions rather than through the
-    // program, because the point is a mint this program did not create.
-    // DefaultAccountState is not on the allowlist.
+
+    // TransferHook is deliberately excluded from SUPPORTED_EXTENSIONS.
     let space = ExtensionType::try_calculate_account_len::<MintState>(&[
-        ExtensionType::DefaultAccountState,
+        ExtensionType::TransferHook,
     ])
     .unwrap();
+
     let lamports = svm.minimum_balance_for_rent_exemption(space);
- 
+
     let instructions = [
         solana_system_interface::instruction::create_account(
             &payer.pubkey(),
@@ -285,12 +286,11 @@ fn validation_rejects_a_mint_carrying_an_unlisted_extension() {
             space as u64,
             &TOKEN_2022_PROGRAM_ID,
         ),
-        // Extension first, mint last. The ordering rule is the same whether
-        // the caller is a program or a client.
-        initialize_default_account_state(
+        initialize_transfer_hook(
             &TOKEN_2022_PROGRAM_ID,
             &mint.pubkey(),
-            &AccountState::Frozen,
+            Some(payer.pubkey()),
+            None,
         )
         .unwrap(),
         initialize_mint2(
@@ -302,14 +302,20 @@ fn validation_rejects_a_mint_carrying_an_unlisted_extension() {
         )
         .unwrap(),
     ];
- 
+
     let blockhash = svm.latest_blockhash();
     let mut transaction =
         Transaction::new_unsigned(Message::new(&instructions, Some(&payer.pubkey())));
+
     transaction.try_sign(&[&payer, &mint], blockhash).unwrap();
     svm.send_transaction(transaction).unwrap();
- 
-    let logs = send_expecting_failure(&mut svm, &payer, assert_supported_mint_ix(&mint.pubkey()));
+
+    let logs = send_expecting_failure(
+        &mut svm,
+        &payer,
+        assert_supported_mint_ix(&mint.pubkey()),
+    );
+
     assert!(
         logs.contains("UnsupportedExtension"),
         "rejected for the wrong reason:\n{logs}"

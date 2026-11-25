@@ -2,34 +2,106 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token_interface::{
-    approve, initialize_mint2, mint_close_authority_initialize, spl_token_2022, transfer_checked, transfer_fee_initialize, Approve,
+    approve, initialize_mint2, mint_close_authority_initialize, transfer_checked, transfer_fee_initialize, Approve,
     InitializeMint2, Mint, MintCloseAuthorityInitialize, TokenInterface, TransferChecked, TransferFeeInitialize,
 };
+pub(crate) use anchor_spl::token_interface::spl_token_2022;
+
 use spl_token_2022::{
     extension::{
         confidential_transfer::{instruction as confidential_instruction, DecryptableBalance},
         confidential_transfer_fee::instruction as confidential_fee_instruction,
-        transfer_fee::TransferFeeConfig, BaseStateWithExtensions, ExtensionType,
-        StateWithExtensions,
+        transfer_fee::{TransferFeeConfig},
+        BaseStateWithExtensions, ExtensionType, StateWithExtensions,
     },
-    state::Mint as MintState,
+    state::{ Mint as MintState},
 };
+
+pub mod constants;
+pub mod error;
+pub mod state;
+pub mod instructions;
+pub use instructions::*;
+
 
 // The length of a ciphertext which is how a decryptable balance is represented in the account data
 pub const AE_CIPHERTEXT_LEN: usize = 36;
  
-declare_id!("6sC5C8VFoTpEZQVn3YK9EUSd5g3Cs6zTT3HCDBGQkyo4");
+declare_id!("6aqHJLG3fQDSHwHbt6NB5uJr54HXxn5o1dkkH9SkTccG");
 
 
 const SUPPORTED_EXTENSIONS: &[ExtensionType] = &[
-    ExtensionType::MintCloseAuthority,
-    ExtensionType::MetadataPointer,
     ExtensionType::TransferFeeConfig,
+    ExtensionType::MetadataPointer,
+    ExtensionType::DefaultAccountState,
+    ExtensionType::MintCloseAuthority,
+    ExtensionType::PermanentDelegate,
+    ExtensionType::ConfidentialTransferMint,
+    ExtensionType::ConfidentialTransferFeeConfig,
 ];
 
 #[program]
 pub mod t22 {
     use super::*;
+
+   
+    pub fn create_compliance_mint(
+        ctx: Context<CreateComplianceMint>,
+        decimals: u8,
+        basis_points: u16,
+        maximum_fee: u64,
+        withdraw_withheld_authority_elgamal_pubkey: [u8; 32],
+    ) -> Result<()> {
+        handle_create_compliance_mint(&ctx.accounts, decimals, basis_points, maximum_fee,withdraw_withheld_authority_elgamal_pubkey)
+    }
+
+    /// Transfer using the fee calculated for the current epoch.
+    pub fn transfer_with_current_epoch_fee(
+        ctx: Context<TransferWithCurrentEpochFee>,
+        amount: u64,
+    ) -> Result<()> {
+        handle_transfer_with_current_epoch_fee(&ctx.accounts, amount)
+    }
+
+    /// Thaw one account after the freeze authority has approved its KYC.
+    pub fn thaw_kyc_verified_account(ctx: Context<ThawKycVerifiedAccount>) -> Result<()> {
+        handle_thaw_kyc_verified_account(&ctx.accounts)
+    }
+
+    pub fn configure_confidential_account(ctx: Context<ConfigureConfidentialAccount>,zero_balance: [u8; 36],max_pending_credit_counter: u64,) -> Result<()> {
+        handle_configure_confidential_account( &ctx.accounts, zero_balance, max_pending_credit_counter,)
+    }
+
+    pub fn approve_confidential_account( ctx: Context<ApproveConfidentialAccount>,) -> Result<()> {
+        handle_approve_confidential_account(&ctx.accounts)
+    }
+
+    pub fn deposit_confidential_tokens(ctx: Context<DepositConfidentialTokens>, amount: u64, decimals: u8,) -> Result<()> {
+        handle_deposit_confidential_tokens(&ctx.accounts, amount, decimals)
+    }
+
+    pub fn apply_confidential_pending_balance(ctx: Context<ApplyConfidentialPendingBalance>, expected_credit_counter: u64, new_balance: [u8; 36],
+    ) -> Result<()> {
+        handle_apply_confidential_pending_balance( &ctx.accounts, expected_credit_counter, new_balance,)
+    }
+
+    pub fn transfer_confidential_tokens( ctx: Context<TransferConfidentialTokens>,
+        new_source_decryptable_balance: [u8; 36],
+        transfer_amount_auditor_ciphertext_lo: [u8; 64],
+        transfer_amount_auditor_ciphertext_hi: [u8; 64],
+    ) -> Result<()> {
+        handle_transfer_confidential_tokens(
+            &ctx.accounts,
+            new_source_decryptable_balance,
+            transfer_amount_auditor_ciphertext_lo,
+            transfer_amount_auditor_ciphertext_hi,
+        )
+    }
+
+    pub fn withdraw_confidential_tokens( ctx: Context<WithdrawConfidentialTokens>, amount: u64, decimals: u8, new_decryptable_available_balance: [u8; 36], ) -> Result<()> {
+        handle_withdraw_confidential_tokens( &ctx.accounts, amount, decimals, new_decryptable_available_balance,)
+    }
+
 
     ///the declarative path.
     /// Everything happens in the `#[account(init, ...)]` attribute on the
@@ -677,4 +749,13 @@ pub struct PermanentDelegateSeize<'info> {
 pub enum MintError {
     #[msg("mint carries an extension this program has not been written to handle")]
     UnsupportedExtension,
+    #[msg("mint does not have a transfer-fee configuration")]
+    MissingTransferFeeConfig,
+    #[msg("could not calculate the transfer fee for the current epoch")]
+    FeeCalculationFailed,
+    #[msg("source or destination token account is not in the initialized state")]
+    TokenAccountNotTransferable,
+    #[msg("token account is not frozen")]
+    TokenAccountNotFrozen,
 }
+
