@@ -137,9 +137,7 @@ pub fn handle_create_compliance_mint(
         &[mint_info.clone(), token_program_info.clone()],
     )?;
 
-    // Initialize confidential transfer fee configuration.
-    // This is required when TransferFeeConfig and ConfidentialTransferMint
-    // are both enabled on the same mint.
+  
     let confidential_fee_ix =
         confidential_fee_instruction::initialize_confidential_transfer_fee_config(
             &accounts.token_program.key(),
@@ -153,7 +151,7 @@ pub fn handle_create_compliance_mint(
         &[mint_info.clone(), token_program_info.clone()],
     )?;
 
-    // InitializeMint2 is intentionally last: the extension set is now sealed.
+    
     initialize_mint2(
         CpiContext::new(
             accounts.token_program.key(),
@@ -201,7 +199,7 @@ pub fn handle_transfer_with_current_epoch_fee(
         .ok_or_else(|| error!(MintError::FeeCalculationFailed))?;
     drop(mint_data);
 
-    // Read both account states through StateWithExtensions, including TLV data.
+    
     let source_data = accounts.source.try_borrow_data()?;
     let source_state = StateWithExtensions::<TokenAccountState>::unpack(&source_data)?;
     require!(

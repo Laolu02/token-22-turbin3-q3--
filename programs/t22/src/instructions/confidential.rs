@@ -1,8 +1,3 @@
-//! Anchor CPI handlers for Token-2022 confidential transfers.
-//!
-//! The client generates and verifies ZK proofs, then supplies the resulting
-//! context-state accounts. The token-account owner signs each operation.
-
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke;
 
@@ -16,9 +11,6 @@ use crate::spl_token_2022::{extension::confidential_transfer::{
 
 use spl_token_confidential_transfer_proof_extraction::instruction::ProofLocation;
 
-// -----------------------------------------------------------------------------
-// CONFIGURE ACCOUNT
-// -----------------------------------------------------------------------------
 
 #[derive(Accounts)]
 pub struct ConfigureConfidentialAccount<'info> {
@@ -75,9 +67,6 @@ pub fn handle_configure_confidential_account(
     Ok(())
 }
 
-// -----------------------------------------------------------------------------
-// APPROVE ACCOUNT
-// -----------------------------------------------------------------------------
 
 #[derive(Accounts)]
 pub struct ApproveConfidentialAccount<'info> {
@@ -119,9 +108,6 @@ pub fn handle_approve_confidential_account(
     Ok(())
 }
 
-// -----------------------------------------------------------------------------
-// DEPOSIT PUBLIC TOKENS INTO CONFIDENTIAL PENDING BALANCE
-// -----------------------------------------------------------------------------
 
 #[derive(Accounts)]
 pub struct DepositConfidentialTokens<'info> {
@@ -166,9 +152,6 @@ pub fn handle_deposit_confidential_tokens(
     Ok(())
 }
 
-// -----------------------------------------------------------------------------
-// APPLY PENDING BALANCE
-// -----------------------------------------------------------------------------
 
 #[derive(Accounts)]
 pub struct ApplyConfidentialPendingBalance<'info> {
@@ -209,10 +192,6 @@ pub fn handle_apply_confidential_pending_balance(
 
     Ok(())
 }
-
-// -----------------------------------------------------------------------------
-// CONFIDENTIAL TRANSFER
-// -----------------------------------------------------------------------------
 
 #[derive(Accounts)]
 pub struct TransferConfidentialTokens<'info> {
@@ -297,9 +276,6 @@ pub fn handle_transfer_confidential_tokens(
     Ok(())
 }
 
-// -----------------------------------------------------------------------------
-// WITHDRAW CONFIDENTIAL TOKENS INTO PUBLIC BALANCE
-// -----------------------------------------------------------------------------
 
 #[derive(Accounts)]
 pub struct WithdrawConfidentialTokens<'info> {
@@ -311,11 +287,9 @@ pub struct WithdrawConfidentialTokens<'info> {
     #[account(owner = token_program.key())]
     pub mint: UncheckedAccount<'info>,
 
-    /// Pre-verified VerifyCiphertextCommitmentEquality context.
     /// CHECK: Token-2022 validates the proof context.
     pub equality_proof_context: UncheckedAccount<'info>,
 
-    /// Pre-verified VerifyBatchedRangeProofU64 context.
     /// CHECK: Token-2022 validates the proof context.
     pub range_proof_context: UncheckedAccount<'info>,
 

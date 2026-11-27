@@ -1,11 +1,3 @@
-//! Integration tests for the compliance instructions currently exposed by t22.
-//!
-//! Run from the Anchor workspace after building the SBF program:
-//!   cargo build-sbf
-//!   cargo test -p t22 --test compliance_tests
-//!
-//! The test binary loads ../../target/deploy/t22.so using LiteSVM.
-
 use anchor_lang::{
     prelude::Pubkey,
     solana_program::{instruction::Instruction, system_program},
@@ -111,8 +103,7 @@ fn create_compliance_mint(svm: &mut LiteSVM, payer: &Keypair) -> Keypair {
     mint
 }
 
-/// A Token-2022 account for a mint with TransferFeeConfig must include
-/// TransferFeeAmount. DefaultAccountState makes it start frozen.
+
 fn create_token_account(
     svm: &mut LiteSVM,
     payer: &Keypair,

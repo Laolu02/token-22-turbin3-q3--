@@ -742,10 +742,6 @@ fn full_confidential_lifecycle_2() {
 
     let mint = Keypair::new();
 
-    // ---------------------------------------------------------
-    // 1. Create the regulated confidential mint.
-    // ---------------------------------------------------------
-
     send(
         &mut svm,
         &payer,
@@ -775,17 +771,8 @@ fn full_confidential_lifecycle_2() {
 
     let extensions = mint_state.get_extension_types().unwrap();
 
-    // assert!(extensions.contains(&ExtensionType::TransferFeeConfig));
-    // assert!(extensions.contains(&ExtensionType::MetadataPointer));
-    // assert!(extensions.contains(&ExtensionType::DefaultAccountState));
-    // assert!(extensions.contains(&ExtensionType::MintCloseAuthority));
-    // assert!(extensions.contains(&ExtensionType::PermanentDelegate));
     assert!(extensions.contains(&ExtensionType::ConfidentialTransferMint));
     assert_eq!(extensions.len(), 1,"This test creates a basic confidential mint");
-
-    // ---------------------------------------------------------
-    // 2. Create, configure, and manually approve Alice and Bob.
-    // ---------------------------------------------------------
 
     let alice_owner = Keypair::new();
     let bob_owner = Keypair::new();
@@ -810,10 +797,6 @@ fn full_confidential_lifecycle_2() {
     assert!(bool::from(read_ct(&svm, &alice.account).approved));
     assert!(bool::from(read_ct(&svm, &bob.account).approved));
 
-    // ---------------------------------------------------------
-    // 3. Mint public tokens to Alice.
-    // ---------------------------------------------------------
-
     send(
         &mut svm,
         &payer,
@@ -831,9 +814,6 @@ fn full_confidential_lifecycle_2() {
         &[],
     );
 
-    // ---------------------------------------------------------
-    // 4. Deposit through the Anchor handler.
-    // ---------------------------------------------------------
 
     let deposit_ix = Instruction {
         program_id: ID,
@@ -870,10 +850,6 @@ fn full_confidential_lifecycle_2() {
         0
     );
 
-    // ---------------------------------------------------------
-    // 5. Apply Alice's pending balance through Anchor.
-    // ---------------------------------------------------------
-
     apply_pending_anchor(
         &mut svm,
         &payer,
@@ -887,10 +863,6 @@ fn full_confidential_lifecycle_2() {
         available_balance(&alice_ct, &alice.elgamal);
 
     assert_eq!(alice_available, 10_000);
-
-    // ---------------------------------------------------------
-    // 6. Generate confidential transfer proofs.
-    // ---------------------------------------------------------
 
     let transfer_amount = 2_500u64;
 
@@ -960,10 +932,6 @@ fn full_confidential_lifecycle_2() {
     .try_into()
     .unwrap();
 
-    // ---------------------------------------------------------
-    // 7. Execute confidential transfer through Anchor.
-    // ---------------------------------------------------------
-
     let transfer_ix = Instruction {
         program_id: ID,
         accounts: accounts::TransferConfidentialTokens {
@@ -1019,10 +987,6 @@ fn full_confidential_lifecycle_2() {
         0
     );
 
-    // ---------------------------------------------------------
-    // 8. Bob applies his pending balance through Anchor.
-    // ---------------------------------------------------------
-
     apply_pending_anchor(
         &mut svm,
         &payer,
@@ -1036,10 +1000,6 @@ fn full_confidential_lifecycle_2() {
         available_balance(&bob_ct, &bob.elgamal);
 
     assert_eq!(bob_available, transfer_amount);
-
-    // ---------------------------------------------------------
-    // 9. Generate fresh withdrawal proofs AFTER applying pending.
-    // ---------------------------------------------------------
 
     let withdraw_amount = 1_000u64;
 
@@ -1077,10 +1037,6 @@ fn full_confidential_lifecycle_2() {
     let new_bob_decryptable =
         bob.aes.encrypt(bob_available - withdraw_amount).to_bytes();
 
-    // ---------------------------------------------------------
-    // 10. Withdraw through the Anchor handler.
-    // ---------------------------------------------------------
-
     let withdraw_ix = Instruction {
         program_id: ID,
         accounts: accounts::WithdrawConfidentialTokens {
@@ -1112,10 +1068,6 @@ fn full_confidential_lifecycle_2() {
         &payer,
         &[withdraw_eq_ctx, withdraw_range_ctx],
     );
-
-    // ---------------------------------------------------------
-    // 11. Verify final public and confidential balances.
-    // ---------------------------------------------------------
 
     let bob_account = svm.get_account(&bob.account).unwrap();
 

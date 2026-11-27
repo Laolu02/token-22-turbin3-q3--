@@ -55,7 +55,6 @@ pub mod t22 {
         handle_create_compliance_mint(&ctx.accounts, decimals, basis_points, maximum_fee,withdraw_withheld_authority_elgamal_pubkey)
     }
 
-    /// Transfer using the fee calculated for the current epoch.
     pub fn transfer_with_current_epoch_fee(
         ctx: Context<TransferWithCurrentEpochFee>,
         amount: u64,
@@ -63,7 +62,6 @@ pub mod t22 {
         handle_transfer_with_current_epoch_fee(&ctx.accounts, amount)
     }
 
-    /// Thaw one account after the freeze authority has approved its KYC.
     pub fn thaw_kyc_verified_account(ctx: Context<ThawKycVerifiedAccount>) -> Result<()> {
         handle_thaw_kyc_verified_account(&ctx.accounts)
     }
